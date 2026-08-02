@@ -260,6 +260,13 @@ DEFAULT_FACTS=(
 # edge-avoidance (flips below/left near frame
 # edges) are computed automatically.
 #
+# Visual style matches the rest of the panel:
+# gold-ring/white marker dot (uses the
+# pre-rendered dot_marker.png), gold-tinted
+# connector line, and a label box with a gold
+# accent bar + thin gold outline (same language
+# as the CTA box).
+#
 # Notes/limits:
 #  - Keep label text under ~28 characters — the
 #    box is a fixed width and does not
@@ -272,6 +279,9 @@ DEFAULT_FACTS=(
 #    diagonal — ffmpeg has no native diagonal
 #    line primitive without much heavier
 #    filters, so this is the practical choice.
+#  - Requires dot_marker.png (generated once at
+#    startup) to be wired in as ffmpeg input
+#    index 2 — see run_video()'s -i list.
 #
 # Sets globals: LABELS_CHAIN (filter string to
 # append), LABELS_OUT (bracketed output label
@@ -292,15 +302,10 @@ build_labels_chain() {
     if [ ! -f "$labels_file" ]; then
         return 0
     fi
-    echo "Using coordinate labels: $labels_file"
 
-    local BOX_W=260
-    local BOX_H=40
-    local V_OFFSET=70
-    local H_OFFSET=40
-
-    local prev="base"
-    local idx=0
+    # First pass: collect valid lines so we know the count up front
+    # (needed to size the marker `split` filter correctly).
+    local xs=() ys=() texts=()
     while IFS=',' read -r x y text; do
         x="$(echo "$x" | tr -d '[:space:]')"
         y="$(echo "$y" | tr -d '[:space:]')"
@@ -308,8 +313,32 @@ build_labels_chain() {
         [[ "$x" =~ ^[0-9]+$ ]] || continue
         [[ "$y" =~ ^[0-9]+$ ]] || continue
         [ -z "$text" ] && continue
-        idx=$((idx + 1))
+        xs+=("$x"); ys+=("$y"); texts+=("$text")
+    done < "$labels_file"
 
+    local n=${#xs[@]}
+    if [ "$n" -eq 0 ]; then
+        echo "NOTICE: $labels_file had no valid lines — skipping labels for this video."
+        return 0
+    fi
+    echo "Using coordinate labels: $labels_file ($n label(s))"
+
+    local BOX_W=260
+    local BOX_H=42
+    local V_OFFSET=70
+    local H_OFFSET=40
+    local ACCENT_W=4
+
+    # Split the pre-rendered marker image (input [2:v]) into one copy per
+    # label so each can be overlaid independently at its own coordinate.
+    local split_outs=""
+    for ((i = 1; i <= n; i++)); do split_outs+="[dm${i}]"; done
+    LABELS_CHAIN+="[2:v]split=${n}${split_outs};"
+
+    local prev="base"
+    for ((i = 0; i < n; i++)); do
+        local idx=$((i + 1))
+        local x="${xs[$i]}" y="${ys[$i]}" text="${texts[$i]}"
         printf '%s' "$text" > "$ASSET_DIR/label${idx}.txt"
 
         local box_y=$((y - V_OFFSET))
@@ -339,21 +368,24 @@ build_labels_chain() {
         fi
         [ "$h_w" -lt 2 ] && h_w=2
 
-        local n1="lbl${idx}_dot" n2="lbl${idx}_v" n3="lbl${idx}_h" n4="lbl${idx}_box" n5="lbl${idx}_txt"
+        local n1="lbl${idx}_dot" n2="lbl${idx}_v" n3="lbl${idx}_h" n4="lbl${idx}_bg" n5="lbl${idx}_bar" n6="lbl${idx}_outline" n7="lbl${idx}_txt"
 
-        LABELS_CHAIN+="[${prev}]drawbox=x=$((x-4)):y=$((y-4)):w=8:h=8:color=white:t=fill[${n1}];"
-        LABELS_CHAIN+="[${n1}]drawbox=x=${x}:y=${seg_y_top}:w=2:h=${seg_h}:color=white@0.9:t=fill[${n2}];"
-        LABELS_CHAIN+="[${n2}]drawbox=x=${h_left}:y=${box_y}:w=${h_w}:h=2:color=white@0.9:t=fill[${n3}];"
-        LABELS_CHAIN+="[${n3}]drawbox=x=${box_x}:y=${box_y}:w=${BOX_W}:h=${BOX_H}:color=black@0.75:t=fill[${n4}];"
-        LABELS_CHAIN+="[${n4}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/label${idx}.txt:fontcolor=white:fontsize=18:x=$((box_x + 14)):y=$((box_y + (BOX_H - 18) / 2))[${n5}];"
+        # Gold-tinted connector line (right-angle: vertical then horizontal)
+        LABELS_CHAIN+="[${prev}]drawbox=x=${x}:y=${seg_y_top}:w=2:h=${seg_h}:color=${GOLD}@0.85:t=fill[${n2}];"
+        LABELS_CHAIN+="[${n2}]drawbox=x=${h_left}:y=${box_y}:w=${h_w}:h=2:color=${GOLD}@0.85:t=fill[${n3}];"
+        # Label box: dark fill + gold accent bar (left edge) + thin gold outline
+        LABELS_CHAIN+="[${n3}]drawbox=x=${box_x}:y=${box_y}:w=${BOX_W}:h=${BOX_H}:color=black@0.78:t=fill[${n4}];"
+        LABELS_CHAIN+="[${n4}]drawbox=x=${box_x}:y=${box_y}:w=${ACCENT_W}:h=${BOX_H}:color=${GOLD}:t=fill[${n5}];"
+        LABELS_CHAIN+="[${n5}]drawbox=x=${box_x}:y=${box_y}:w=${BOX_W}:h=${BOX_H}:color=${GOLD}@0.5:t=1[${n6}];"
+        LABELS_CHAIN+="[${n6}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/label${idx}.txt:fontcolor=white:fontsize=18:x=$((box_x + ACCENT_W + 14)):y=$((box_y + (BOX_H - 18) / 2)):${SHADOW}[${n7}];"
+        # Circular gold-ring/white marker dot, overlaid on top of everything
+        LABELS_CHAIN+="[${n7}][dm${idx}]overlay=x=$((x - 8)):y=$((y - 8))[${n1}];"
 
-        prev="$n5"
-    done < "$labels_file"
+        prev="$n1"
+    done
 
-    if [ "$idx" -gt 0 ]; then
-        LABELS_OUT="[${prev}]"
-    fi
-    echo "Drew $idx label(s) from $labels_file"
+    LABELS_OUT="[${prev}]"
+    echo "Drew $n label(s) from $labels_file"
 }
 
 #############################################
