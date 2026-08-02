@@ -244,6 +244,119 @@ DEFAULT_FACTS=(
 )
 
 #############################################
+# build_labels_chain: optional feature — draws
+# pointer/callout labels onto specific
+# coordinates in the video, similar to
+# hand-annotated documentary footage. Fully
+# optional per video: only activates if a file
+# named <basename>.labels.txt exists.
+#
+# File format — one label per line, comma
+# separated:
+#   x,y,Label text here
+# where x,y is the pixel position on the
+# 1280x720 output frame that the label should
+# point at. Box placement, connector line, and
+# edge-avoidance (flips below/left near frame
+# edges) are computed automatically.
+#
+# Notes/limits:
+#  - Keep label text under ~28 characters — the
+#    box is a fixed width and does not
+#    reflow/resize to fit longer text.
+#  - Best used for points with x > ~370 so
+#    labels don't collide with the left info
+#    panel.
+#  - The connector is a right-angle line
+#    (vertical then horizontal), not a true
+#    diagonal — ffmpeg has no native diagonal
+#    line primitive without much heavier
+#    filters, so this is the practical choice.
+#
+# Sets globals: LABELS_CHAIN (filter string to
+# append), LABELS_OUT (bracketed output label
+# to continue the chain from, e.g. "[base]" if
+# no labels file exists, or the last label's
+# output node otherwise).
+#############################################
+build_labels_chain() {
+    local url="$1"
+    local base
+    base="${url##*/}"
+    base="${base%.*}"
+
+    LABELS_CHAIN=""
+    LABELS_OUT="[base]"
+
+    local labels_file="${base}.labels.txt"
+    if [ ! -f "$labels_file" ]; then
+        return 0
+    fi
+    echo "Using coordinate labels: $labels_file"
+
+    local BOX_W=260
+    local BOX_H=40
+    local V_OFFSET=70
+    local H_OFFSET=40
+
+    local prev="base"
+    local idx=0
+    while IFS=',' read -r x y text; do
+        x="$(echo "$x" | tr -d '[:space:]')"
+        y="$(echo "$y" | tr -d '[:space:]')"
+        text="$(echo "$text" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        [[ "$x" =~ ^[0-9]+$ ]] || continue
+        [[ "$y" =~ ^[0-9]+$ ]] || continue
+        [ -z "$text" ] && continue
+        idx=$((idx + 1))
+
+        printf '%s' "$text" > "$ASSET_DIR/label${idx}.txt"
+
+        local box_y=$((y - V_OFFSET))
+        if [ "$box_y" -lt 20 ]; then
+            box_y=$((y + V_OFFSET - BOX_H))
+        fi
+        local box_x=$((x + H_OFFSET))
+        if [ $((box_x + BOX_W)) -gt 1260 ]; then
+            box_x=$((x - H_OFFSET - BOX_W))
+        fi
+        [ "$box_x" -lt 0 ] && box_x=10
+
+        local seg_y_top seg_y_bot
+        if [ "$box_y" -gt "$y" ]; then
+            seg_y_top=$y; seg_y_bot=$box_y
+        else
+            seg_y_top=$box_y; seg_y_bot=$y
+        fi
+        local seg_h=$((seg_y_bot - seg_y_top))
+        [ "$seg_h" -lt 2 ] && seg_h=2
+
+        local h_left h_w
+        if [ "$box_x" -gt "$x" ]; then
+            h_left=$x; h_w=$((box_x - x))
+        else
+            h_left=$box_x; h_w=$((x - box_x))
+        fi
+        [ "$h_w" -lt 2 ] && h_w=2
+
+        local n1="lbl${idx}_dot" n2="lbl${idx}_v" n3="lbl${idx}_h" n4="lbl${idx}_box" n5="lbl${idx}_txt"
+
+        LABELS_CHAIN+="[${prev}]drawbox=x=$((x-4)):y=$((y-4)):w=8:h=8:color=white:t=fill[${n1}];"
+        LABELS_CHAIN+="[${n1}]drawbox=x=${x}:y=${seg_y_top}:w=2:h=${seg_h}:color=white@0.9:t=fill[${n2}];"
+        LABELS_CHAIN+="[${n2}]drawbox=x=${h_left}:y=${box_y}:w=${h_w}:h=2:color=white@0.9:t=fill[${n3}];"
+        LABELS_CHAIN+="[${n3}]drawbox=x=${box_x}:y=${box_y}:w=${BOX_W}:h=${BOX_H}:color=black@0.75:t=fill[${n4}];"
+        LABELS_CHAIN+="[${n4}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/label${idx}.txt:fontcolor=white:fontsize=18:x=$((box_x + 14)):y=$((box_y + (BOX_H - 18) / 2))[${n5}];"
+
+        prev="$n5"
+    done < "$labels_file"
+
+    if [ "$idx" -gt 0 ]; then
+        LABELS_OUT="[${prev}]"
+    fi
+    echo "Drew $idx label(s) from $labels_file"
+}
+
+#############################################
 # prepare_video_content: (re)loads headlines +
 # facts for the video about to stream, and
 # rebuilds BASE_CHAIN / FACT_END to match.
@@ -354,7 +467,12 @@ prepare_video_content() {
     CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
     CHAIN+="[ovl][video]overlay=0:0[base];"
 
-    CHAIN+="[base]drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
+    # Optional coordinate-based callout labels for this video, drawn onto
+    # the raw video before the panel/UI so the panel stays on top.
+    build_labels_chain "$url"
+    CHAIN+="$LABELS_CHAIN"
+
+    CHAIN+="${LABELS_OUT}drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
     CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=black@0.45:t=fill[p2];"
     CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=black@0.30:t=fill[p3];"
     CHAIN+="[p3]drawbox=x=341:y=0:w=4:h=720:color=black@0.15:t=fill[p4];"
