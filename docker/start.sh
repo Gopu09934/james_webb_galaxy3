@@ -383,6 +383,17 @@ prepare_video_content() {
     base="${url##*/}"
     base="${base%.*}"
 
+    # FIX: local declaration for the loop vars used throughout this
+    # function. Without this, bash treats $i / $idx as GLOBAL variables,
+    # and since the outer stream loop (`for ((i = 0; i < NUM_URLS; i++))`
+    # in the main "Stream loop" section at the bottom of this file) also
+    # uses a bare $i, every call to this function was silently resetting
+    # that outer loop's counter to whatever value $i last held here
+    # (e.g. the last headline index). That's what caused the stream to
+    # get stuck replaying the very first video forever instead of
+    # advancing through the whole playlist.
+    local i idx
+
     RAW_LINES=()
     if [ -f "${base}.headlines.txt" ]; then
         echo "Using curated headlines: ${base}.headlines.txt"
